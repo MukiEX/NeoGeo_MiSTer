@@ -113,7 +113,8 @@ video_freak video_freak
 // 0         1         2         3          4         5         6   
 // 01234567890123456789012345678901 23456789012345678901234567890123
 // 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHIJKLMNOPQRSTUV
-// XXXXXXXXXXXXX XXX XXXXX XXXXXXX  XXXXXXXXXXXXX            XXXXXX 
+// XXXXXXXXXXXXX XXX XXXXX XXXXXXX  XXXXXXXXXXXXXXXXXXX      XXXXXX 
+// PaddleNeoGeo: oD-oI (status[50:45]) = mouse/spinner paddle options
 
 `include "build_id.v"
 localparam CONF_STR = {
@@ -139,6 +140,11 @@ localparam CONF_STR = {
 	"-;",
 	"o9A,Input,Joystick or Spinner,Joystick,Spinner,Mouse(Irr.Maze);",
 	"oBC,Multitap,No,NEO-FTC1B,NeoTris;",
+	"oD,Mouse Paddle,Off,X:P1 Y:P2;",
+	"H6oE,Paddle Type,Neo Geo,Taito F3;",
+	"H6oF,Paddle Mouse Y,Normal,Flipped;",
+	"H6oG,F3 Step Clock,VBlank,Port Read;",
+	"H6oHI,Paddle Speed,1:1,1:2,1:4,1:8;",
 	"-;",
 	"H0O4,Memory Card,Plugged,Unplugged;",
 	"RL,Reload Memory Card;",
@@ -321,6 +327,13 @@ wire [24:0] ps2_mouse;
 wire        forced_scandoubler;
 wire [63:0] status;
 
+// PaddleNeoGeo options
+wire       pdl_en    = status[45];    // mouse X -> P1 paddle, mouse Y -> P2 paddle
+wire       pdl_f3    = status[46];    // 0: Neo Geo 7-bit position, 1: Taito F3 quadrature on LEFT/RIGHT
+wire       pdl_yflip = status[47];    // invert mouse Y
+wire       pdl_rdclk = status[48];    // F3 step clock: 0 = once per VBlank, 1 = once per port read
+wire [1:0] pdl_sens  = status[50:49]; // input counts per paddle unit: 1,2,4,8
+
 wire [64:0] rtc;
 
 wire        ioctl_wr;
@@ -351,7 +364,7 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(2)) hps_io
 	.ps2_key(ps2_key),
 
 	.status(status),				// status read (32 bits)
-	.status_menumask({status[22], 9'd0, en216p, bk_autosave | ~bk_pending, ~dbg_menu,~SYSTEM_MVS,1'b0,SYSTEM_CDx}),
+	.status_menumask({status[22], 8'd0, ~pdl_en, en216p, bk_autosave | ~bk_pending, ~dbg_menu,~SYSTEM_MVS,1'b0,SYSTEM_CDx}),
 
 	.RTC(rtc),
 	.sdram_sz(sdram_sz),
@@ -1477,6 +1490,90 @@ wire [11:0] joy_0 = status[43] ? joy_0a : status[44] ? joy_0b : joystick_0;
 wire [11:0] joy_1 = status[43] ? joy_1a : status[44] ? joy_1b : joystick_1;
 
 
+// Low byte of REG_P1CNT / REG_P2CNT before inversion: {D,C,B,A,RIGHT,LEFT,DOWN,UP}
+wire [7:0] p1_joy = {joy_0[7:4]|{3{~xram & joy_0[11]}}|{{2{joystick_0[13]}},{2{joystick_0[12]}}}, joy_0[0], joy_0[1], joy_0[2], joy_0[3]};
+wire [7:0] p2_joy = {joy_1[7:4]|{3{~xram & joy_1[11]}}|{{2{joystick_1[13]}},{2{joystick_1[12]}}}, joy_1[0], joy_1[1], joy_1[2], joy_1[3]};
+
+/////////////////////////  PaddleNeoGeo  /////////////////////////
+// Mouse X (plus spinner_0) drives P1, mouse Y (plus spinner_1) drives P2.
+// Left mouse button = P1 A, right mouse button = P2 A.
+//  Neo Geo type: Pop 'n Bounce format, bit 7 = any of A-D, bits 6:0 = position.
+//  Taito F3 type: Gray-code quadrature replaces RIGHT/LEFT; UP/DOWN and A-D stay on the pad.
+
+reg              pdl_stb_x = 0, pdl_stb_y = 0;
+reg signed [9:0] pdl_dx = 0, pdl_dy = 0;
+
+always @(posedge clk_sys) begin
+	reg old_ms, old_s0, old_s1, ms_seen = 0;
+	reg signed [9:0] mx, my, s0, s1;
+	reg ms_evt, s0_evt, s1_evt;
+
+	old_ms <= ps2_mouse[24];
+	old_s0 <= spinner_0[8];
+	old_s1 <= spinner_1[8];
+
+	// Main sends one mouse event on cold boot (see the stock spinner logic); ignore it
+	ms_evt = (old_ms ^ ps2_mouse[24]) & ms_seen;
+	if (old_ms ^ ps2_mouse[24]) ms_seen <= 1;
+	s0_evt = old_s0 ^ spinner_0[8];
+	s1_evt = old_s1 ^ spinner_1[8];
+
+	// PS/2: X right-positive, Y forward-positive, 9-bit with sign in the status byte
+	mx = {ps2_mouse[4], ps2_mouse[4], ps2_mouse[15:8]};
+	my = {ps2_mouse[5], ps2_mouse[5], ps2_mouse[23:16]};
+	if (pdl_yflip) my = -my;
+	s0 = {{2{spinner_0[7]}}, spinner_0[7:0]};
+	s1 = {{2{spinner_1[7]}}, spinner_1[7:0]};
+
+	pdl_stb_x <= ms_evt | s0_evt;
+	pdl_stb_y <= ms_evt | s1_evt;
+	pdl_dx    <= (ms_evt ? mx : 10'sd0) + (s0_evt ? s0 : 10'sd0);
+	pdl_dy    <= (ms_evt ? my : 10'sd0) + (s1_evt ? s1 : 10'sd0);
+end
+
+// F3 step clocks: start of VBlank, or the end of each 68K read of the port
+// (REG_P1CNT 300000-31FFFF, REG_P2CNT 340000-35FFFF, even byte, same decode as C1)
+wire pdl_io_rd = ~nAS & M68K_RW & ~nUDS & ~A23Z & ~A22Z;
+wire pdl_rd1   = pdl_io_rd & (M68K_ADDR[21:17] == 5'b11000);
+wire pdl_rd2   = pdl_io_rd & (M68K_ADDR[21:17] == 5'b11010);
+
+reg pdl_step_x = 0, pdl_step_y = 0;
+always @(posedge clk_sys) begin
+	reg old_rd1, old_rd2, old_bnkb;
+	reg vbl_start;
+
+	old_rd1  <= pdl_rd1;
+	old_rd2  <= pdl_rd2;
+	old_bnkb <= nBNKB;
+	vbl_start = old_bnkb & ~nBNKB;
+
+	pdl_step_x <= pdl_rdclk ? (old_rd1 & ~pdl_rd1) : vbl_start;
+	pdl_step_y <= pdl_rdclk ? (old_rd2 & ~pdl_rd2) : vbl_start;
+end
+
+wire [6:0] pdl_pos_x, pdl_pos_y;
+wire [1:0] pdl_quad_x, pdl_quad_y;
+
+paddle_axis PDL_X(
+	.clk(clk_sys), .enable(pdl_en), .f3_mode(pdl_f3), .sens(pdl_sens),
+	.delta_stb(pdl_stb_x), .delta(pdl_dx), .step_stb(pdl_step_x),
+	.pos(pdl_pos_x), .quad(pdl_quad_x)
+);
+
+paddle_axis PDL_Y(
+	.clk(clk_sys), .enable(pdl_en), .f3_mode(pdl_f3), .sens(pdl_sens),
+	.delta_stb(pdl_stb_y), .delta(pdl_dy), .step_stb(pdl_step_y),
+	.pos(pdl_pos_y), .quad(pdl_quad_y)
+);
+
+wire [7:0] p1_pdl = pdl_f3 ? {p1_joy[7:5], p1_joy[4] | ps2_mouse[0], pdl_quad_x[0], pdl_quad_x[1], p1_joy[1:0]}
+                           : {(|p1_joy[7:4]) | ps2_mouse[0], pdl_pos_x};
+wire [7:0] p2_pdl = pdl_f3 ? {p2_joy[7:5], p2_joy[4] | ps2_mouse[1], pdl_quad_y[0], pdl_quad_y[1], p2_joy[1:0]}
+                           : {(|p2_joy[7:4]) | ps2_mouse[1], pdl_pos_y};
+
+wire [7:0] p1_low, p2_low; // assigned after the stock spinner/mouse logic below
+///////////////////////////////////////////////////////////////////
+
 neo_c1 C1(
 	.CLK(CLK_48M),
 	.M68K_ADDR(M68K_ADDR[21:17]),
@@ -1491,8 +1588,8 @@ neo_c1 C1(
 	.nLSPOE(nLSPOE), .nLSPWE(nLSPWE),
 	.nCRDO(nCRDO), .nCRDW(nCRDW), .nCRDC(nCRDC),
 	.nSDW(nSDW),
-	.P1_IN(~{(joy_0[9:8]|ps2_mouse[2]), {use_mouse ? ms_pos : use_sp ? {|{joy_0[7:4],ps2_mouse[1:0]},sp0} : {joy_0[7:4]|{3{~xram & joy_0[11]}}|{{2{joystick_0[13]}},{2{joystick_0[12]}}}, joy_0[0], joy_0[1], joy_0[2], joy_0[3]}}}),
-	.P2_IN(~{ joy_1[9:8],               {use_mouse ? ms_btn : use_sp ? {|{joy_1[7:4]},               sp1} : {joy_1[7:4]|{3{~xram & joy_1[11]}}|{{2{joystick_1[13]}},{2{joystick_1[12]}}}, joy_1[0], joy_1[1], joy_1[2], joy_1[3]}}}),
+	.P1_IN(~{(joy_0[9:8]|ps2_mouse[2]), p1_low}),
+	.P2_IN(~{ joy_1[9:8],               p2_low}),
 	.nCD1(nCD1), .nCD2(nCD2),
 	.nWP(0),			// Memory card is never write-protected
 	.nROMWAIT(~rom_wait), .nPWAIT0(~p_wait[0]), .nPWAIT1(~p_wait[1]), .PDTACK(1),
@@ -1543,6 +1640,10 @@ reg        ms_xy;
 reg  [7:0] ms_x, ms_y;
 wire [7:0] ms_pos = ms_xy ? ms_y : ms_x;
 wire [7:0] ms_btn = {2'b00, ps2_mouse[1:0], 4'b0000};
+
+// P1/P2 low byte: paddle mode overrides the stock Input setting
+assign p1_low = pdl_en ? p1_pdl : use_mouse ? ms_pos : use_sp ? {|{joy_0[7:4],ps2_mouse[1:0]},sp0} : p1_joy;
+assign p2_low = pdl_en ? p2_pdl : use_mouse ? ms_btn : use_sp ? {|{joy_1[7:4]},               sp1} : p2_joy;
 
 always @(posedge clk_sys) begin
 	reg old_ms;
