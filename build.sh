@@ -91,9 +91,32 @@ trap 'exit 143' TERM
 # Match the invoking user so bind-mounted outputs are not owned by root.
 # Quartus may write user settings; give this numeric UID a writable HOME.
 mkdir -p "$PROJECT_DIR/.build-home"
+# Archives can carry restrictive modes; the snapshot only needs to be ours and writable.
+chmod -R u+rwX "$PROJECT_DIR"
+
+IMAGE=theypsilon/quartus-lite-c5:17.0.2
+# :z gives the snapshot an SELinux label containers may write (no-op without SELinux).
+# It only relabels this run's private copy, never the source checkout.
+MOUNT="$PROJECT_DIR:/project:z"
+
+# Probe write access first so a mount problem fails fast with a clear reason.
+if ! docker run --rm --user "$(id -u):$(id -g)" -v "$MOUNT" -w /project "$IMAGE" \
+        sh -c 'mkdir /project/.probe && rmdir /project/.probe' > "$RUN_DIR/probe.log" 2>&1; then
+    echo "GATE FAIL: the container cannot write to the snapshot directory."
+    cat "$RUN_DIR/probe.log"
+    echo
+    echo "Host side:      $(ls -ldn "$PROJECT_DIR")   (you are uid $(id -u), gid $(id -g))"
+    docker run --rm --user "$(id -u):$(id -g)" -v "$MOUNT" "$IMAGE" \
+        sh -c 'echo "Container side: $(ls -ldn /project)   (running as $(id -u):$(id -g))"' 2>&1 || :
+    docker info --format 'Docker security options: {{.SecurityOptions}}' 2>/dev/null || :
+    echo "If the owner IDs differ between the two sides, Docker is running rootless (user namespace)."
+    echo "If they match, check SELinux/AppArmor denials: sudo ausearch -m avc -ts recent"
+    exit 1
+fi
+
 docker run --rm --name "$CONTAINER" --user "$(id -u):$(id -g)" \
-    -e HOME=/project/.build-home -v "$PROJECT_DIR:/project" \
-    -w /project theypsilon/quartus-lite-c5:17.0.2 \
+    -e HOME=/project/.build-home -v "$MOUNT" \
+    -w /project "$IMAGE" \
     quartus_sh --flow compile "$PROJECT" > "$LOG" 2>&1 &
 BUILD_PID=$!
 
