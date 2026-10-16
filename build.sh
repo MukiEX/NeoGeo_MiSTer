@@ -137,8 +137,16 @@ BUILD_PID=""
 
 echo
 echo "build exited with rc=$RC"
+if [ "$RC" -ne 0 ]; then
+    # The tail is only Quartus' summary; show the actual errors and their context.
+    echo "Errors (full log: $LOG):"
+    grep -n -B2 -A3 -E "^(Error|Critical Warning)|ERROR:|can't|couldn't" "$LOG" | head -60 || tail -40 "$LOG"
+    for r in "$PROJECT_DIR"/output_files/*.rpt "$PROJECT_DIR"/*.rpt; do
+        [ -f "$r" ] && grep -H -n -E "^(Error|Critical Warning)" "$r" | head -20
+    done
+    exit "$RC"
+fi
 tail -5 "$LOG"
-[ "$RC" -eq 0 ] || exit "$RC"
 
 RBF=output_files/$PROJECT.rbf
 RPT=output_files/$PROJECT.sta.rpt
