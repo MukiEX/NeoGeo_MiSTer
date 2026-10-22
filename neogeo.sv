@@ -113,8 +113,8 @@ video_freak video_freak
 // 0         1         2         3          4         5         6   
 // 01234567890123456789012345678901 23456789012345678901234567890123
 // 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHIJKLMNOPQRSTUV
-// XXXXXXXXXXXXX XXX XXXXX XXXXXXX  XXXXXXXXXXXXXXXXXXX      XXXXXX 
-// PaddleNeoGeo: oD-oI (status[50:45]) = mouse/spinner paddle options
+// XXXXXXXXXXXXX XXX XXXXX XXXXXXX  XXXXXXXXXXXXXXXXXXXX     XXXXXX 
+// PaddleNeoGeo: oD-oJ (status[51:45]) = mouse/spinner paddle options
 
 `include "build_id.v"
 localparam CONF_STR = {
@@ -142,6 +142,7 @@ localparam CONF_STR = {
 	"oBC,Multitap,No,NEO-FTC1B,NeoTris;",
 	"oD,Mouse Paddle,Off,X:P1 Y:P2;",
 	"H6oE,Paddle Type,Neo Geo,Taito F3;",
+	"H6oJ,Paddle Mouse X,Normal,Flipped;",
 	"H6oF,Paddle Mouse Y,Normal,Flipped;",
 	"H6oG,F3 Step Clock,VBlank,Port Read;",
 	"H6oHI,Paddle Speed,1:1,1:2,1:4,1:8;",
@@ -330,6 +331,7 @@ wire [63:0] status;
 // PaddleNeoGeo options
 wire       pdl_en    = status[45];    // mouse X -> P1 paddle, mouse Y -> P2 paddle
 wire       pdl_f3    = status[46];    // 0: Neo Geo 7-bit position, 1: Taito F3 quadrature on LEFT/RIGHT
+wire       pdl_xflip = status[51];    // invert mouse X
 wire       pdl_yflip = status[47];    // invert mouse Y
 wire       pdl_rdclk = status[48];    // F3 step clock: 0 = once per VBlank, 1 = once per port read
 wire [1:0] pdl_sens  = status[50:49]; // input counts per paddle unit: 1,2,4,8
@@ -1521,6 +1523,9 @@ always @(posedge clk_sys) begin
 	// PS/2: X right-positive, Y forward-positive, 9-bit with sign in the status byte
 	mx = {ps2_mouse[4], ps2_mouse[4], ps2_mouse[15:8]};
 	my = {ps2_mouse[5], ps2_mouse[5], ps2_mouse[23:16]};
+	// Mouse X is negated by default: tested on hardware, the raw PS/2 sign ran the paddle backwards.
+	// "Flipped" restores the raw direction.
+	if (!pdl_xflip) mx = -mx;
 	if (pdl_yflip) my = -my;
 	s0 = {{2{spinner_0[7]}}, spinner_0[7:0]};
 	s1 = {{2{spinner_1[7]}}, spinner_1[7:0]};
