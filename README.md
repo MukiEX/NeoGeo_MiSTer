@@ -1,3 +1,26 @@
+# PaddleNeoGeo
+
+A fork of the MiSTer Neo Geo core that adds a mouse/spinner paddle mode for paddle-patched puzzle games. The upstream README follows below.
+
+## Paddle options (OSD, under Multitap)
+* **Mouse Paddle**: Off / X:P1 Y:P2. Mouse X (plus spinner 1) drives P1, mouse Y (plus spinner 2) drives P2. Overrides the Input setting.
+* **Paddle Type**
+  * Neo Geo: Pop 'n Bounce format (bit 7 = any of A-D, bits 6:0 = position).
+  * Taito F3: Gray-code quadrature on joystick RIGHT/LEFT; UP/DOWN and A-D stay on the pad.
+* **Paddle Mouse X / Y**: Normal / Flipped.
+* **F3 Step Clock**: VBlank (one step per frame) or Port Read (one step per 68K read of $300000/$340000).
+* **Paddle Speed**: 1, 2, 4 or 8 mouse counts per paddle unit.
+
+Left mouse button = P1 A, right mouse button = P2 A.
+
+## Building
+`./build.sh [--seed X] [--dual] [--allow-timing-fail]` builds an isolated snapshot under `builds/run.*` with Docker and Quartus 17.0 Lite, producing `PaddleNeoGeo_YYYYMMDD.rbf`. Concurrent builds are safe.
+
+Paddle logic lives in `rtl/io/paddle_axis.sv`; `sim/paddle_axis_tb.sv` is a self-checking Verilator testbench:
+`verilator --binary --timing -Wno-DECLFILENAME -Wno-PROCASSINIT sim/paddle_axis_tb.sv rtl/io/paddle_axis.sv`
+
+---
+
 
 # [SNK Neo Geo](https://en.wikipedia.org/wiki/Neo_Geo_(system)) for [MiSTer Platform](https://github.com/MiSTer-devel/Main_MiSTer/wiki) 
 
