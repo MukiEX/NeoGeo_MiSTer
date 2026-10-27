@@ -1,0 +1,139 @@
+# Build PaddleNeoGeo with Quartus 17.0 Lite (via build.sh) and publish it.
+#
+#   Push a tag named paddle-*  -> build, then create a GitHub Release with the RBF attached.
+#   Run manually (Actions tab) -> test build, RBF uploaded as a workflow artifact only.
+#
+# Seeds are tried in order until one meets timing; a build that fails for any
+# other reason stops immediately.
+
+name: Build and release
+
+on:
+  push:
+    tags:
+      - 'paddle-*'
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: 'Fitter seeds to try, in order (space separated)'
+        default: '1 2 3'
+        type: string
+      dual:
+        description: 'Build the DualSDR revision'
+        default: false
+        type: boolean
+      allow_timing_fail:
+        description: 'Keep the first build even if timing is not met (test builds only)'
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      SEEDS: ${{ inputs.seeds || '1 2 3' }}
+      DUAL: ${{ inputs.dual && '--dual' || '' }}
+      ALLOW_FAIL: ${{ inputs.allow_timing_fail && '--allow-timing-fail' || '' }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Free disk space for the Quartus image
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af >/dev/null
+          df -h /
+
+      - name: Pull Quartus image
+        run: |
+          for i in 1 2 3; do
+            docker pull theypsilon/quartus-lite-c5:17.0.2 && exit 0
+            echo "Pull failed, retrying in 30s"; sleep 30
+          done
+          exit 1
+
+      - name: Build
+        id: build
+        run: |
+          rm -f result.txt
+          for seed in $SEEDS; do
+            echo "::group::Seed $seed"
+            rc=0
+            ./build.sh --seed "$seed" $DUAL $ALLOW_FAIL --result-file result.txt || rc=$?
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then break; fi
+            if [ "$rc" -ne 4 ]; then
+              echo "::error::Build failed with rc=$rc (not a timing failure); see the Seed $seed log group."
+              exit "$rc"
+            fi
+            echo "::warning::Seed $seed did not meet timing."
+          done
+          if [ ! -s result.txt ]; then
+            echo "::error::No seed in '$SEEDS' met timing."
+            exit 1
+          fi
+          rbf=$(cat result.txt)
+          info="$(dirname "$rbf")/build-info.txt"
+          echo "rbf=$rbf"   >> "$GITHUB_OUTPUT"
+          echo "info=$info" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$rbf")" >> "$GITHUB_OUTPUT"
+          {
+            echo "### $(basename "$rbf")"
+            echo '```'
+            cat "$info"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.name }}
+          path: |
+            ${{ steps.build.outputs.rbf }}
+            ${{ steps.build.outputs.info }}
+          if-no-files-found: error
+
+      - name: Upload failed build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            builds/*/progress.log
+            builds/*/probe.log
+            builds/*/build-info.txt
+            builds/*/project/output_files/*.rpt
+            builds/*/project/output_files/*.summary
+          if-no-files-found: ignore
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          RBF: ${{ steps.build.outputs.rbf }}
+          INFO: ${{ steps.build.outputs.info }}
+        run: |
+          {
+            echo "PaddleNeoGeo build of \`$TAG\`."
+            echo
+            echo "Copy \`$(basename "$RBF")\` to your MiSTer (e.g. \`_Console\`). It shows up as its own"
+            echo "core and uses the same \`games/NEOGEO\` ROM folder as the stock Neo Geo core."
+            echo
+            echo '```'
+            cat "$INFO"
+            echo '```'
+          } > notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$RBF" --clobber
+          else
+            gh release create "$TAG" "$RBF" --title "PaddleNeoGeo $TAG" --notes-file notes.md --verify-tag
+          fi

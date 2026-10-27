@@ -16,6 +16,11 @@ Left mouse button = P1 A, right mouse button = P2 A.
 ## Building
 `./build.sh [--seed X] [--dual] [--allow-timing-fail]` builds an isolated snapshot under `builds/run.*` with Docker and Quartus 17.0 Lite, producing `PaddleNeoGeo_YYYYMMDD.rbf`. Concurrent builds are safe.
 
+Each build also writes `build-info.txt` (commit, seed, utilization, timing slack, MD5) next to the RBF.
+
+## Releasing
+Push a tag starting with `paddle-` (e.g. `git tag paddle-20261026 && git push origin paddle-20261026`). GitHub Actions (`.github/workflows/release.yml`) builds it with the same `build.sh`, tries seeds 1, 2, 3 until one meets timing, and publishes a GitHub Release with the RBF and its build info. Running the workflow manually from the Actions tab makes a test build (choice of seeds, DualSDR, allow timing failure) and attaches the RBF to the run as an artifact instead.
+
 Paddle logic lives in `rtl/io/paddle_axis.sv`; `sim/paddle_axis_tb.sv` is a self-checking Verilator testbench:
 `verilator --binary --timing -Wno-DECLFILENAME -Wno-PROCASSINIT sim/paddle_axis_tb.sv rtl/io/paddle_axis.sv`
 
